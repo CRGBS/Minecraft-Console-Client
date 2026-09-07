@@ -1,246 +1,134 @@
-name: Build MCC and Documents
+name: Build MCC win-x64
 
 on:
   push:
     branches:
       - master
   workflow_dispatch:
-  
+
+permissions:
+  contents: read
+
 env:
-  PROJECT: "MinecraftClient"
-  target-version: "net10.0"
-  dotnet-version: "10.0.x"
-  compile-flags: "--self-contained=true -c Release -p:UseAppHost=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=Embedded -p:PublishSingleFile=true"
+  PROJECT: MinecraftClient
+  TARGET_FRAMEWORK: net10.0
+  DOTNET_VERSION: 10.0.x
 
 jobs:
-  determine-build:
-    runs-on: ubuntu-slim
-    outputs:
-      skip: ${{ steps.check-skip.outputs.skip }}
-    steps:
-    - name: Check skip CI
-      id: check-skip
-      run: |
-        LOWER=$(echo "$COMMIT_MSG" | tr '[:upper:]' '[:lower:]')
-        if echo "$LOWER" | grep -qE 'skip.?ci|ci.?skip'; then
-          echo "skip=true" >> $GITHUB_OUTPUT
-        else
-          echo "skip=false" >> $GITHUB_OUTPUT
-        fi
-      env:
-        COMMIT_MSG: ${{ github.event.head_commit.message }}
-
-  fetch-translations:
-    strategy:
-      fail-fast: true
-    runs-on: ubuntu-latest
-    needs: determine-build
-
-    if: ${{ needs.determine-build.outputs.skip != 'true' }}
-
-    timeout-minutes: 15
+  build-win-x64:
+    name: Build win-x64.exe
+    runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
-    - name: Check cache
-      uses: actions/cache/restore@v3
-      id: cache-check
-      with:
-        path: ${{ github.workspace }}/*
-        key: "translation-${{ github.sha }}"
-        lookup-only: true
-        restore-keys: "translation-"
-
-    - name: Checkout
-      if: steps.cache-check.outputs.cache-hit != 'true'
-      uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-        submodules: 'true'
-
-    - name: Check Crowdin secrets
-      id: crowdin-check
-      run: |
-        if [ -z "$CROWDIN_PROJECT_ID" ] || [ -z "$CROWDIN_PERSONAL_TOKEN" ]; then
-          echo "available=false" >> $GITHUB_OUTPUT
-        else
-          echo "available=true" >> $GITHUB_OUTPUT
-        fi
-      env:
-        CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
-        CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_TOKEN }}
-
-    - name: Download translations from crowdin
-      uses: crowdin/github-action@v2.4.0
-      if: steps.cache-check.outputs.cache-hit != 'true' && steps.crowdin-check.outputs.available == 'true'
-      with:
-        upload_sources: ${{ github.repository == 'MCCTeam/Minecraft-Console-Client' }}
-        upload_translations: false
-        download_translations: true
-
-        localization_branch_name: l10n_master
-        create_pull_request: false 
-        push_translations: false
-
-        base_path: ${{ github.workspace }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
-        CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_TOKEN }}
-      
-    - name: Save cache
-      uses: actions/cache/save@v3
-      if: steps.cache-check.outputs.cache-hit != 'true'
-      with:
-        path:  ${{ github.workspace }}/*
-        key: "translation-${{ github.sha }}"
-
-  create-tag:
-    runs-on: ubuntu-slim
-    timeout-minutes: 5 # Wait 5 minutes in case of network issues/etc
-    needs: determine-build
-    if: ${{ needs.determine-build.outputs.skip != 'true' }}
-    steps:
-      - id: make-tag
-        run: |
-          TAG="$(date -u +'%Y%m%d')-${{ github.run_number }}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "TAG=$TAG" >> $GITHUB_ENV
-      
-      - name: Create Release Tag
-        uses: actions/github-script@v7
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
-          script: |
-            const tag = process.env.TAG;
-            try {
-                await github.rest.git.createRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: `refs/tags/${tag}`,
-                  sha: context.sha
-                });
-              } catch(error) {
-                if (error.message.includes('already exists')) {
-                  console.log(`Tag ${tag} already exists`);
-                } else {
-                  throw error;
-                }
-              }
-    outputs:
-      build-tag: ${{ steps.make-tag.outputs.tag }}
+          fetch-depth: 1
+          submodules: recursive
 
-  build:
-    runs-on: ubuntu-latest
-    # Check if we're not skipping build, tag is created, and translations successfully fetched (or skipped)
-    if: ${{ needs.determine-build.outputs.skip != 'true' &&
-            needs.create-tag.result == 'success' &&
-            (needs.fetch-translations.result == 'success' || needs.fetch-translations.result == 'skipped')
-          }}
-    needs: [determine-build, fetch-translations, create-tag]
-    timeout-minutes: 15
-    strategy:
-      matrix:
-        target: [win-x86, win-x64, win-arm64, linux-x64, linux-arm, linux-arm64, osx-x64, osx-arm64]
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-        submodules: 'true'
-        
-    - name: Get Current Date
-      run: |
-        echo date_dashed=$(date -u +'%Y-%m-%d') >> $GITHUB_ENV
-        
-    - name: Restore Translations (if available)
-      uses: actions/cache/restore@v3
-      with:
-        path: ${{ github.workspace }}/*
-        key: "translation-${{ github.sha }}"
-        restore-keys: "translation-"
-          
-    - name: Setup .NET SDK
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: ${{ env.dotnet-version }}
-        
-    - name: Setup Environment Variables
-      run: |
-        PROJECT_PATH=${{ github.workspace }}/${{ env.PROJECT }}
-        FILE_EXT=${{ (startsWith(matrix.target, 'win') && '.exe') || '' }}
-        TARGET_OUT_PATH=$PROJECT_PATH/bin/Release/${{ env.target-version }}/${{ matrix.target }}/publish/
-    
-        echo "project-path=$PROJECT_PATH" >> $GITHUB_ENV
-        echo "file-ext=$FILE_EXT" >> $GITHUB_ENV
-        echo "target-out-path=$TARGET_OUT_PATH" >> $GITHUB_ENV
-        echo "assembly-info=$PROJECT_PATH/Properties/AssemblyInfo.cs" >> $GITHUB_ENV
-        echo "build-version-info=${{ needs.create-tag.outputs.build-tag }}" >> $GITHUB_ENV
-        echo "commit=$(echo ${{ github.sha }} | cut -c 1-7)" >> $GITHUB_ENV
-        
-    - name: Setup Binaries Path
-      run: |
-        echo built-executable-path=${{ env.target-out-path }}${{ env.PROJECT }}${{ env.file-ext }} >> $GITHUB_ENV
-
-    - name: Set Version Info
-      run: |
-        echo '' >> ${{ env.assembly-info }}
-        echo "[assembly: AssemblyConfiguration(\"GitHub build ${{ github.run_number }}, built on ${{ env.date_dashed }} from commit ${{ env.commit }}\")]" >> ${{ env.assembly-info }}
-        
-    - name: Inject Sentry DSN (if applicable)
-      if: ${{ github.repository == 'MCCTeam/Minecraft-Console-Client' }}
-      run: |
-        grep -q 'SentryDSN = "";' ${{ env.project-path }}/Program.cs || { echo "SentryDSN pattern not found in Program.cs"; exit 1; }
-        sed -i -e 's|SentryDSN = "";|SentryDSN = "${{ secrets.SENTRY_DSN }}";|g' ${{ env.project-path }}/Program.cs
-
-    - name: Build Target
-      run: dotnet publish ${{ env.project-path }}/${{ env.PROJECT }}.csproj -f ${{ env.target-version }} -r ${{ matrix.target }} ${{ env.compile-flags }}
-      env:
-        DOTNET_NOLOGO: true
-
-    - name: Rename Binary
-      run: |
-        mv ${{ env.built-executable-path }} ${{ env.PROJECT }}-${{ env.build-version-info }}-${{ matrix.target }}${{ env.file-ext }}
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ env.PROJECT }}-${{ env.build-version-info }}-${{ matrix.target }}
-        path: ${{ env.PROJECT }}-${{ env.build-version-info }}-${{ matrix.target }}${{ env.file-ext }}
-        if-no-files-found: error
-
-  create-release:
-    runs-on: ubuntu-slim
-    needs: [create-tag, build]
-    if: ${{ needs.build.result == 'success' && needs.create-tag.result == 'success' }}
-    steps:
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v4
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
         with:
-          path: artifacts/
-          merge-multiple: true
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            **/packages.lock.json
+            **/Directory.Packages.props
 
-      - name: Truncate commit message for release name
-        id: release-name
+      - name: Prepare build information
+        id: info
+        shell: pwsh
         run: |
-           SUBJECT=$(echo "$COMMIT_MSG" | head -n 1)
-           MAX=220
-           TRUNCATED="${SUBJECT:0:$MAX}"
-           echo "name=${BUILD_TAG}: $TRUNCATED" >> $GITHUB_OUTPUT
+          $shortCommit = "${{ github.sha }}".Substring(0, 7)
+          $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd")
+          $outputPath = Join-Path "${{ github.workspace }}" "publish"
+
+          "short-commit=$shortCommit" >> $env:GITHUB_OUTPUT
+          "build-date=$buildDate" >> $env:GITHUB_OUTPUT
+          "output-path=$outputPath" >> $env:GITHUB_OUTPUT
+
+      - name: Set assembly build information
+        shell: pwsh
         env:
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
-          BUILD_TAG: ${{ needs.create-tag.outputs.build-tag }}
-          
-      - name: Create Release
-        uses: ncipollo/release-action@v1.14.0
+          BUILD_DATE: ${{ steps.info.outputs.build-date }}
+          SHORT_COMMIT: ${{ steps.info.outputs.short-commit }}
+        run: |
+          $assemblyInfo = Join-Path `
+            "${{ github.workspace }}" `
+            "${{ env.PROJECT }}\Properties\AssemblyInfo.cs"
+
+          if (-not (Test-Path $assemblyInfo)) {
+            throw "AssemblyInfo.cs not found: $assemblyInfo"
+          }
+
+          $configuration = `
+            "`n[assembly: AssemblyConfiguration(`"GitHub build ${{ github.run_number }}, built on $env:BUILD_DATE from commit $env:SHORT_COMMIT`")]"
+
+          Add-Content `
+            -Path $assemblyInfo `
+            -Value $configuration `
+            -Encoding UTF8
+
+      - name: Publish win-x64 single EXE
+        shell: pwsh
+        env:
+          OUTPUT_PATH: ${{ steps.info.outputs.output-path }}
+        run: |
+          dotnet publish `
+            "${{ github.workspace }}\${{ env.PROJECT }}\${{ env.PROJECT }}.csproj" `
+            --framework "${{ env.TARGET_FRAMEWORK }}" `
+            --runtime "win-x64" `
+            --configuration Release `
+            --self-contained true `
+            --output "$env:OUTPUT_PATH" `
+            -p:UseAppHost=true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:DebugType=Embedded
+
+      - name: Rename executable
+        id: executable
+        shell: pwsh
+        env:
+          OUTPUT_PATH: ${{ steps.info.outputs.output-path }}
+          SHORT_COMMIT: ${{ steps.info.outputs.short-commit }}
+        run: |
+          $source = Join-Path `
+            "$env:OUTPUT_PATH" `
+            "${{ env.PROJECT }}.exe"
+
+          if (-not (Test-Path $source)) {
+            Write-Host "Publish output:"
+            Get-ChildItem -Path "$env:OUTPUT_PATH" -Recurse
+            throw "Expected executable not found: $source"
+          }
+
+          $fileName = `
+            "${{ env.PROJECT }}-${{ github.run_number }}-$env:SHORT_COMMIT-win-x64.exe"
+
+          $destination = Join-Path `
+            "${{ github.workspace }}" `
+            $fileName
+
+          Move-Item `
+            -Path $source `
+            -Destination $destination `
+            -Force
+
+          "path=$destination" >> $env:GITHUB_OUTPUT
+          "name=$fileName" >> $env:GITHUB_OUTPUT
+
+          Get-Item $destination |
+            Format-List Name, Length, LastWriteTime
+
+      - name: Upload win-x64.exe
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          artifacts: "artifacts/**/*"
-          tag: ${{ needs.create-tag.outputs.build-tag }}
-          name: ${{ steps.release-name.outputs.name }}
-          generateReleaseNotes: true
-          artifactErrorsFailBuild: true
-          allowUpdates: true
-          makeLatest: true
-          omitBodyDuringUpdate: true
-          omitNameDuringUpdate: true
-          replacesArtifacts: true
+          name: MCC-win-x64
+          path: ${{ steps.executable.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
