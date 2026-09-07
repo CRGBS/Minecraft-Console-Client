@@ -1404,6 +1404,16 @@ namespace MinecraftClient.Scripting
         }
 
         /// <summary>
+        /// Return the current Minecraft access token for credential-dependent scripts.
+        /// SECURITY: Only expose this to locally trusted scripts. Never log or persist it.
+        /// Offline-mode accounts return an empty string or non-usable session value.
+        /// </summary>
+        protected string GetMinecraftAccessToken ()
+        {
+            return Handler.GetSessionID ();
+        }
+
+        /// <summary>
         /// Return the EntityID of the current player
         /// </summary>
         /// <returns>EntityID of the current player</returns>
