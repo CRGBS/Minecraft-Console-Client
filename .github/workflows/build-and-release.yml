@@ -1,134 +1,130 @@
-name: Build MCC win-x64
+strategy:
+  fail-fast: false
+  matrix:
+    include:
+      - runtime: win-x64
+        os: windows-latest
+        extension: .exe
 
-on:
-  push:
-    branches:
-      - master
-  workflow_dispatch:
+      - runtime: linux-x64
+        os: ubuntu-latest
+        extension: ""
 
-permissions:
-  contents: read
+      - runtime: linux-arm64
+        os: ubuntu-latest
+        extension: ""
 
-env:
-  PROJECT: MinecraftClient
-  TARGET_FRAMEWORK: net10.0
-  DOTNET_VERSION: 10.0.x
+steps:
+  - name: Checkout source
+    uses: actions/checkout@v4
+    with:
+      fetch-depth: 1
+      submodules: recursive
 
-jobs:
-  build-win-x64:
-    name: Build win-x64.exe
-    runs-on: windows-latest
-    timeout-minutes: 30
+  - name: Setup .NET SDK
+    uses: actions/setup-dotnet@v4
+    with:
+      dotnet-version: ${{ env.DOTNET_VERSION }}
+      cache: true
+      cache-dependency-path: |
+        **/*.csproj
+        **/packages.lock.json
+        **/Directory.Packages.props
 
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          submodules: recursive
+  - name: Prepare build information
+    id: info
+    shell: pwsh
+    run: |
+      $shortCommit = "${{ github.sha }}".Substring(0, 7)
+      $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd")
+      $outputPath = Join-Path "${{ github.workspace }}" "publish"
 
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
-          cache: true
-          cache-dependency-path: |
-            **/*.csproj
-            **/packages.lock.json
-            **/Directory.Packages.props
+      "short-commit=$shortCommit" >> $env:GITHUB_OUTPUT
+      "build-date=$buildDate" >> $env:GITHUB_OUTPUT
+      "output-path=$outputPath" >> $env:GITHUB_OUTPUT
 
-      - name: Prepare build information
-        id: info
-        shell: pwsh
-        run: |
-          $shortCommit = "${{ github.sha }}".Substring(0, 7)
-          $buildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd")
-          $outputPath = Join-Path "${{ github.workspace }}" "publish"
+  - name: Set assembly build information
+    shell: pwsh
+    env:
+      BUILD_DATE: ${{ steps.info.outputs.build-date }}
+      SHORT_COMMIT: ${{ steps.info.outputs.short-commit }}
+    run: |
+      $assemblyInfo = Join-Path `
+        "${{ github.workspace }}" `
+        "${{ env.PROJECT }}\Properties\AssemblyInfo.cs"
 
-          "short-commit=$shortCommit" >> $env:GITHUB_OUTPUT
-          "build-date=$buildDate" >> $env:GITHUB_OUTPUT
-          "output-path=$outputPath" >> $env:GITHUB_OUTPUT
+      if (-not (Test-Path $assemblyInfo)) {
+        throw "AssemblyInfo.cs not found: $assemblyInfo"
+      }
 
-      - name: Set assembly build information
-        shell: pwsh
-        env:
-          BUILD_DATE: ${{ steps.info.outputs.build-date }}
-          SHORT_COMMIT: ${{ steps.info.outputs.short-commit }}
-        run: |
-          $assemblyInfo = Join-Path `
-            "${{ github.workspace }}" `
-            "${{ env.PROJECT }}\Properties\AssemblyInfo.cs"
+      $configuration = `
+        "`n[assembly: AssemblyConfiguration(`"GitHub build ${{ github.run_number }}, built on $env:BUILD_DATE from commit $env:SHORT_COMMIT (${{ matrix.runtime }})`")]"
 
-          if (-not (Test-Path $assemblyInfo)) {
-            throw "AssemblyInfo.cs not found: $assemblyInfo"
-          }
+      Add-Content `
+        -Path $assemblyInfo `
+        -Value $configuration `
+        -Encoding UTF8
 
-          $configuration = `
-            "`n[assembly: AssemblyConfiguration(`"GitHub build ${{ github.run_number }}, built on $env:BUILD_DATE from commit $env:SHORT_COMMIT`")]"
+  - name: Publish single file
+    shell: pwsh
+    env:
+      OUTPUT_PATH: ${{ steps.info.outputs.output-path }}
+    run: |
+      dotnet publish `
+        "${{ github.workspace }}\${{ env.PROJECT }}\${{ env.PROJECT }}.csproj" `
+        --framework "${{ env.TARGET_FRAMEWORK }}" `
+        --runtime "${{ matrix.runtime }}" `
+        --configuration Release `
+        --self-contained true `
+        --output "$env:OUTPUT_PATH" `
+        -p:UseAppHost=true `
+        -p:PublishSingleFile=true `
+        -p:IncludeNativeLibrariesForSelfExtract=true `
+        -p:EnableCompressionInSingleFile=true `
+        -p:DebugType=Embedded
 
-          Add-Content `
-            -Path $assemblyInfo `
-            -Value $configuration `
-            -Encoding UTF8
+  - name: Find executable
+    id: executable
+    shell: pwsh
+    env:
+      OUTPUT_PATH: ${{ steps.info.outputs.output-path }}
+      SHORT_COMMIT: ${{ steps.info.outputs.short-commit }}
+    run: |
+      $extension = "${{ matrix.extension }}"
 
-      - name: Publish win-x64 single EXE
-        shell: pwsh
-        env:
-          OUTPUT_PATH: ${{ steps.info.outputs.output-path }}
-        run: |
-          dotnet publish `
-            "${{ github.workspace }}\${{ env.PROJECT }}\${{ env.PROJECT }}.csproj" `
-            --framework "${{ env.TARGET_FRAMEWORK }}" `
-            --runtime "win-x64" `
-            --configuration Release `
-            --self-contained true `
-            --output "$env:OUTPUT_PATH" `
-            -p:UseAppHost=true `
-            -p:PublishSingleFile=true `
-            -p:IncludeNativeLibrariesForSelfExtract=true `
-            -p:EnableCompressionInSingleFile=true `
-            -p:DebugType=Embedded
+      $source = Join-Path `
+        "$env:OUTPUT_PATH" `
+        "${{ env.PROJECT }}$extension"
 
-      - name: Rename executable
-        id: executable
-        shell: pwsh
-        env:
-          OUTPUT_PATH: ${{ steps.info.outputs.output-path }}
-          SHORT_COMMIT: ${{ steps.info.outputs.short-commit }}
-        run: |
-          $source = Join-Path `
-            "$env:OUTPUT_PATH" `
-            "${{ env.PROJECT }}.exe"
+      if (-not (Test-Path $source)) {
+        Write-Host "Publish output:"
+        Get-ChildItem -Path "$env:OUTPUT_PATH" -Recurse
+        throw "Expected executable not found: $source"
+      }
 
-          if (-not (Test-Path $source)) {
-            Write-Host "Publish output:"
-            Get-ChildItem -Path "$env:OUTPUT_PATH" -Recurse
-            throw "Expected executable not found: $source"
-          }
+      $fileName = `
+        "${{ env.PROJECT }}-${{ github.run_number }}-$env:SHORT_COMMIT-${{ matrix.runtime }}$extension"
 
-          $fileName = `
-            "${{ env.PROJECT }}-${{ github.run_number }}-$env:SHORT_COMMIT-win-x64.exe"
+      $destination = Join-Path `
+        "${{ github.workspace }}" `
+        $fileName
 
-          $destination = Join-Path `
-            "${{ github.workspace }}" `
-            $fileName
+      Move-Item `
+        -Path $source `
+        -Destination $destination `
+        -Force
 
-          Move-Item `
-            -Path $source `
-            -Destination $destination `
-            -Force
+      "path=$destination" >> $env:GITHUB_OUTPUT
+      "name=$fileName" >> $env:GITHUB_OUTPUT
 
-          "path=$destination" >> $env:GITHUB_OUTPUT
-          "name=$fileName" >> $env:GITHUB_OUTPUT
+      Get-Item $destination |
+        Format-List Name, Length, LastWriteTime
 
-          Get-Item $destination |
-            Format-List Name, Length, LastWriteTime
-
-      - name: Upload win-x64.exe
-        uses: actions/upload-artifact@v4
-        with:
-          name: MCC-win-x64
-          path: ${{ steps.executable.outputs.path }}
-          if-no-files-found: error
-          retention-days: 30
-          compression-level: 0
+  - name: Upload artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: MCC-${{ matrix.runtime }}
+      path: ${{ steps.executable.outputs.path }}
+      if-no-files-found: error
+      retention-days: 30
+      compression-level: 0
